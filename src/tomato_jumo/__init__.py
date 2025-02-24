@@ -1,11 +1,12 @@
 from datetime import datetime
-from typing import Any
 import serial
 import minimalmodbus
 import time
 from threading import Thread, current_thread, RLock
-from tomato.driverinterface_1_0 import Attr, ModelInterface, Task
+from tomato.driverinterface_2_0 import Attr, ModelInterface, DriverModel, Val, Task
 from functools import wraps
+import pint
+import xarray as xr
 
 # Known values from:
 # JUMO Quantrol LC100/LC200/LC300
@@ -41,162 +42,205 @@ def modbus_delay(func):
 
 
 class DriverInterface(ModelInterface):
-    class DeviceManager(ModelInterface.DeviceManager):
-        instrument: minimalmodbus.Instrument
-        """minimalmodbus.Instrument, used for communication with the device"""
+    def DeviceFactory(self, key, **kwargs):
+        return Device(self, key, **kwargs)
 
-        portlock: RLock
-        """threading.RLock, used to ensure exclusive access to the serial port"""
 
-        last_action: float
-        """a timestamp of last MODBUS read/write obtained using time.perf_counter()"""
+class Device(DriverModel):
+    instrument: minimalmodbus.Instrument
+    """minimalmodbus.Instrument, used for communication with the device"""
 
-        _ramp_rate: float
+    portlock: RLock
+    """threading.RLock, used to ensure exclusive access to the serial port"""
 
-        _ramp_target: float
+    last_action: float
+    """a timestamp of last MODBUS read/write obtained using time.perf_counter()"""
 
-        _ramp_task: Thread
+    ramp_rate: pint.Quantity
 
-        @property
-        def _temperature(self):
-            val = self.instrument.read_float(
-                registeraddress=PARAM_MAP["temperature"],
+    ramp_target: pint.Quantity
+
+    ramp_task: Thread
+
+    @property
+    def temperature(self) -> pint.Quantity:
+        val = self.instrument.read_float(
+            registeraddress=PARAM_MAP["temperature"],
+            byteorder=minimalmodbus.BYTEORDER_LITTLE_SWAP,
+        )
+        self.last_action = time.perf_counter()
+        return pint.Quantity(val, "degC")
+
+    @property
+    def setpoint(self) -> pint.Quantity:
+        val = self.instrument.read_float(
+            registeraddress=PARAM_MAP["setpoint"],
+            byteorder=minimalmodbus.BYTEORDER_LITTLE_SWAP,
+        )
+        self.last_action = time.perf_counter()
+        return pint.Quantity(val, "degC")
+
+    @property
+    def duty_cycle(self) -> pint.Quantity:
+        val = self.instrument.read_float(
+            registeraddress=PARAM_MAP["duty_cycle"],
+            byteorder=minimalmodbus.BYTEORDER_LITTLE_SWAP,
+        )
+        self.last_action = time.perf_counter()
+        return pint.Quantity(val / 100.0, "percent")
+
+    def __init__(self, driver: ModelInterface, key: tuple[str, int], **kwargs: dict):
+        super().__init__(driver, key, **kwargs)
+        address, channel = key
+        s = serial.Serial(
+            port=address,
+            baudrate=9600,
+            bytesize=8,
+            parity="N",
+            stopbits=1,
+            exclusive=True,
+        )
+        self.instrument = minimalmodbus.Instrument(port=s, slaveaddress=channel)
+        self.ramp_target = None
+        self.ramp_rate = None
+        self.portlock = RLock()
+        self.last_action = time.perf_counter()
+
+    def attrs(self, **kwargs) -> dict[str, Attr]:
+        """Returns a dict of available attributes for the device."""
+        attrs_dict = {
+            "setpoint": Attr(
+                type=pint.Quantity,
+                units="degC",
+                status=True,
+                rw=True,
+                minimum=pint.Quantity(0, "degC"),
+            ),
+            "ramp_rate": Attr(
+                type=pint.Quantity,
+                units="kelvin/min",
+                rw=True,
+                maximum=pint.Quantity("600 K/min"),
+            ),
+            "ramp_target": Attr(
+                type=pint.Quantity,
+                units="degC",
+                rw=True,
+                minimum=pint.Quantity(0, "degC"),
+            ),
+        }
+        return attrs_dict
+
+    @modbus_delay
+    def set_attr(self, attr: str, val: Val, **kwargs: dict) -> Val:
+        assert attr in self.attrs(), f"unknown attr: {attr!r}"
+        props = self.attrs()[attr]
+        assert props.rw
+
+        # First coerce val to correct type:
+        if not isinstance(val, props.type):
+            val = props.type(val)
+        if isinstance(val, pint.Quantity):
+            if val.dimensionless and props.units is not None:
+                val = pint.Quantity(val.m, props.units)
+            assert val.dimensionality == pint.Quantity(props.units).dimensionality, (
+                f"attr {attr!r} has the wrong dimensionality {str(val.dimensionality)}"
+            )
+        assert props.minimum is None or val > props.minimum, (
+            f"attr {attr!r} is smaller than {props.minimum}"
+        )
+        assert props.maximum is None or val < props.maximum, (
+            f"attr {attr!r} is greater than {props.maximum}"
+        )
+
+        # Then set val
+        if attr in {"ramp_rate", "ramp_target"}:
+            setattr(self, attr, val)
+        else:
+            register_nr = PARAM_MAP[attr]
+            self.instrument.write_float(
+                registeraddress=register_nr,
+                value=val.to("degC").m,
                 byteorder=minimalmodbus.BYTEORDER_LITTLE_SWAP,
             )
             self.last_action = time.perf_counter()
-            return val
 
-        @property
-        def _setpoint(self):
-            val = self.instrument.read_float(
-                registeraddress=PARAM_MAP["setpoint"],
-                byteorder=minimalmodbus.BYTEORDER_LITTLE_SWAP,
-            )
-            self.last_action = time.perf_counter()
-            return val
+        return val
 
-        @property
-        def _duty_cycle(self):
-            val = self.instrument.read_float(
-                registeraddress=PARAM_MAP["duty_cycle"],
-                byteorder=minimalmodbus.BYTEORDER_LITTLE_SWAP,
-            )
-            self.last_action = time.perf_counter()
-            return val / 100.0
+    @modbus_delay
+    def get_attr(self, attr: str, **kwargs: dict) -> Val:
+        """
+        Retrieves the value of an attribute from the instrument.
 
-        def __init__(
-            self, driver: ModelInterface, key: tuple[str, int], **kwargs: dict
-        ):
-            super().__init__(driver, key, **kwargs)
-            address, channel = key
-            s = serial.Serial(
-                port=address,
-                baudrate=9600,
-                bytesize=8,
-                parity="N",
-                stopbits=1,
-                exclusive=True,
-            )
-            self.instrument = minimalmodbus.Instrument(port=s, slaveaddress=channel)
-            self._ramp_target = None
-            self._ramp_rate = None
-            self.portlock = RLock()
-            self.last_action = time.perf_counter()
+        Checks whether the attribute is in allowed attrs. Converts return values to
+        expected types using maps.
 
-        def attrs(self, **kwargs) -> dict[str, Attr]:
-            """Returns a dict of available attributes for the device."""
-            attrs_dict = {
-                "temperature": Attr(type=float, units="Celsius", status=True),
-                "setpoint": Attr(type=float, units="Celsius", status=True, rw=True),
-                "ramp_rate": Attr(type=float, units="Celsius/min", rw=True),
-                "ramp_target": Attr(type=float, units="Celsius", rw=True),
-                "duty_cycle": Attr(type=float, units="%", status=True),
-            }
-            return attrs_dict
+        """
+        assert attr in self.attrs(), f"unknown attr: {attr!r}"
+        return getattr(self, attr)
 
-        @modbus_delay
-        def set_attr(self, attr: str, val: Any, **kwargs: dict):
-            if attr in self.attrs() and self.attrs()[attr].rw:
-                if attr in {"ramp_rate", "ramp_target"}:
-                    setattr(self, f"_{attr}", val)
+    def capabilities(self, **kwargs) -> set:
+        """Returns a set of capabilities supported by this device."""
+        caps = {"constant_temperature", "temperature_ramp"}
+        return caps
+
+    def do_measure(self, **kwargs):
+        setp = self.setpoint
+        temp = self.temperature
+        r_rt = self.ramp_rate
+        r_tt = self.ramp_target
+        uts = datetime.now().timestamp()
+        data_vars = {
+            "setpoint": (["uts"], [setp.m], {"units": str(setp.u)}),
+            "temperature": (["uts"], [temp.m], {"units": str(temp.u)}),
+        }
+        if r_rt is not None:
+            data_vars["ramp_rate"] = (["uts"], [r_rt.m], {"units": str(r_rt.u)})
+        if r_tt is not None:
+            data_vars["ramp_target"] = (["uts"], [r_tt.m], {"units": str(r_tt.u)})
+
+        self.last_data = xr.Dataset(
+            data_vars=data_vars,
+            coords={"uts": (["uts"], [uts])},
+        )
+
+    def prepare_task(self, task: Task, **kwargs: dict):
+        super().prepare_task(task=task, **kwargs)
+        if task.technique_name in {"temperature_ramp"}:
+            self.ramp_task = Thread(target=self._temperature_ramp, daemon=True)
+            self.ramp_task.do_run = True
+            self.ramp_task.start()
+
+    def reset(self, **kwargs):
+        super().reset(**kwargs)
+        self.ramp_task.do_run = False
+        self.set_attr(attr="setpoint", val=200001)
+
+    def _temperature_ramp(self):
+        thread = current_thread()
+        T_start = self.temperature
+        T_end = self.ramp_target
+        if T_end > T_start:
+            sign = 1
+        else:
+            sign = -1
+
+        t_start = time.perf_counter()
+        t_prev = t_start
+
+        while getattr(thread, "do_run"):
+            t_now = time.perf_counter()
+            if t_now - t_prev >= 2.0:
+                dt = pint.Quantity(t_now - t_start, "s")
+                delta = dt * self.ramp_rate
+                setpoint = (T_start.to("K") + sign * delta).to("degC")
+                if sign > 0 and setpoint >= T_end:
+                    self.set_attr(attr="setpoint", val=T_end)
+                    break
+                elif sign < 0 and setpoint <= T_end:
+                    self.set_attr(attr="setpoint", val=T_end)
+                    break
                 else:
-                    register_nr = PARAM_MAP[attr]
-                    self.instrument.write_float(
-                        registeraddress=register_nr,
-                        value=val,
-                        byteorder=minimalmodbus.BYTEORDER_LITTLE_SWAP,
-                    )
-                    self.last_action = time.perf_counter()
-            else:
-                raise ValueError(f"Unknown attr: {attr!r}")
-
-        @modbus_delay
-        def get_attr(self, attr: str, **kwargs: dict) -> Any:
-            """
-            Retrieves the value of an attribute from the instrument.
-
-            Checks whether the attribute is in allowed attrs. Converts return values to
-            expected types using maps.
-
-            """
-            if attr in self.attrs():
-                return getattr(self, f"_{attr}")
-            else:
-                raise ValueError(f"Unknown attr: {attr!r}")
-
-        def capabilities(self, **kwargs) -> set:
-            """Returns a set of capabilities supported by this device."""
-            caps = {"constant_temperature", "temperature_ramp"}
-            return caps
-
-        def do_task(self, task: Task, **kwargs):
-            """
-            Iterate over all attrs and get their values.
-
-            TODO: The read can be batched.
-            """
-            uts = datetime.now().timestamp()
-            self.data["uts"].append(uts)
-            for key in self.attrs(**kwargs):
-                val = self.get_attr(attr=key)
-                self.data[key].append(val)
-
-        def prepare_task(self, task: Task, **kwargs: dict):
-            super().prepare_task(task=task, **kwargs)
-            if task.technique_name in {"temperature_ramp"}:
-                self._ramp_task = Thread(target=self._temperature_ramp, daemon=True)
-                self._ramp_task.do_run = True
-                self._ramp_task.start()
-
-        def reset(self, **kwargs):
-            super().reset(**kwargs)
-            self.set_attr(attr="setpoint", val=200001)
-
-        def _temperature_ramp(self):
-            thread = current_thread()
-            T_start = self.get_attr(attr="temperature")
-            T_end = self.get_attr(attr="ramp_target")
-            if T_end > T_start:
-                sign = 1
-            else:
-                sign = -1
-
-            t_start = time.perf_counter()
-            t_prev = t_start
-
-            while getattr(thread, "do_run"):
-                t_now = time.perf_counter()
-                if t_now - t_prev >= 2.0:
-                    dt = t_now - t_start
-                    delta = dt * self.get_attr(attr="ramp_rate") / 60.0
-                    setpoint = T_start + sign * delta
-                    if sign > 0 and setpoint >= T_end:
-                        self.set_attr(attr="setpoint", val=T_end)
-                        break
-                    elif sign < 0 and setpoint <= T_end:
-                        self.set_attr(attr="setpoint", val=T_end)
-                        break
-                    else:
-                        self.set_attr(attr="setpoint", val=setpoint)
-                    t_prev = t_now
-                time.sleep(0.2)
+                    self.set_attr(attr="setpoint", val=setpoint)
+                t_prev = t_now
+            time.sleep(0.2)
