@@ -3,7 +3,7 @@ import serial
 import minimalmodbus
 import time
 from threading import Thread, current_thread, RLock
-from tomato.driverinterface_2_0 import Attr, ModelInterface, DriverModel, Val, Task
+from tomato.driverinterface_2_0 import Attr, ModelInterface, ModelDevice, Val, Task
 from functools import wraps
 import pint
 import xarray as xr
@@ -32,7 +32,7 @@ MODBUS_DELAY = 0.02
 
 def modbus_delay(func):
     @wraps(func)
-    def wrapper(self: ModelInterface.DeviceManager, **kwargs):
+    def wrapper(self: ModelDevice, **kwargs):
         with self.portlock:
             if time.perf_counter() - self.last_action < MODBUS_DELAY:
                 time.sleep(MODBUS_DELAY)
@@ -46,15 +46,18 @@ class DriverInterface(ModelInterface):
         return Device(self, key, **kwargs)
 
 
-class Device(DriverModel):
+class Device(ModelDevice):
+    s: serial.Serial
+    """:class:`serial.Serial` port, used for communication with the device."""
+
     instrument: minimalmodbus.Instrument
-    """minimalmodbus.Instrument, used for communication with the device"""
+    """:class:`minimalmodbus.Instrument`, used for communication with the device over MODBUS"""
 
     portlock: RLock
-    """threading.RLock, used to ensure exclusive access to the serial port"""
+    """:class:`threading.RLock`, used to ensure exclusive access to the serial port"""
 
     last_action: float
-    """a timestamp of last MODBUS read/write obtained using time.perf_counter()"""
+    """a timestamp of last MODBUS read/write obtained using :func:`time.perf_counter`"""
 
     ramp_rate: pint.Quantity
 
@@ -63,6 +66,7 @@ class Device(DriverModel):
     ramp_task: Thread
 
     @property
+    @modbus_delay
     def temperature(self) -> pint.Quantity:
         val = self.instrument.read_float(
             registeraddress=PARAM_MAP["temperature"],
@@ -72,6 +76,7 @@ class Device(DriverModel):
         return pint.Quantity(val, "degC")
 
     @property
+    @modbus_delay
     def setpoint(self) -> pint.Quantity:
         val = self.instrument.read_float(
             registeraddress=PARAM_MAP["setpoint"],
@@ -92,7 +97,7 @@ class Device(DriverModel):
     def __init__(self, driver: ModelInterface, key: tuple[str, int], **kwargs: dict):
         super().__init__(driver, key, **kwargs)
         address, channel = key
-        s = serial.Serial(
+        self.s = serial.Serial(
             port=address,
             baudrate=9600,
             bytesize=8,
@@ -100,11 +105,14 @@ class Device(DriverModel):
             stopbits=1,
             exclusive=True,
         )
-        self.instrument = minimalmodbus.Instrument(port=s, slaveaddress=channel)
+        self.instrument = minimalmodbus.Instrument(
+            port=self.s, slaveaddress=int(channel)
+        )
         self.ramp_target = None
         self.ramp_rate = None
         self.portlock = RLock()
         self.last_action = time.perf_counter()
+        self.ramp_task = Thread(target=self._temperature_ramp, daemon=True)
 
     def attrs(self, **kwargs) -> dict[str, Attr]:
         """Returns a dict of available attributes for the device."""
