@@ -10,11 +10,9 @@ This driver is based on the [`minimalmodbus`](https://github.com/pyhys/minimalmo
 - `temperature_ramp` for a gradual heating / cooling followed by a hold
 
 ### Attributes
-- `temperature` which is the temperature of the process thermocouple, `RO`, `float`
-- `setpoint` which is the current temperature setpoint, `RW`, `float`
-- `ramp_rate` which is the temperature ramp rate, `RW`, `float`
-- `ramp_target` which is the target of the temperature ramp, `RW`, `float`
-- `duty_cycle` which is the current duty cycle of the heater, `RO`, `float`
+- `setpoint` which is the current temperature setpoint, `pint.Quantity(float, "degC")`
+- `ramp_rate` which is the temperature ramp rate, `pint.Quantity(float, "K/min")`
+- `ramp_target` which is the target of the temperature ramp, `pint.Quantity(float, "degC")`
 
 ## Contributors
 
