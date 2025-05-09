@@ -22,6 +22,7 @@ import xarray as xr
 REGISTER_MAP = {
     0x3200: "setpoint",
     0x0031: "temperature",
+    0x0035: "eeprom_setpoint",
     0x0037: "duty_cycle",
 }
 
@@ -82,17 +83,24 @@ class Device(ModelDevice):
             registeraddress=PARAM_MAP["setpoint"],
             byteorder=minimalmodbus.BYTEORDER_LITTLE_SWAP,
         )
+        # Check for controller setpoint - read EEPROM value as fallback
+        if val == 200001:
+            val = self.instrument.read_float(
+                registeraddress=PARAM_MAP["eeprom_setpoint"],
+                byteorder=minimalmodbus.BYTEORDER_LITTLE_SWAP,
+            )
         self.last_action = time.perf_counter()
         return pint.Quantity(val, "degC")
 
     @property
+    @modbus_delay
     def duty_cycle(self) -> pint.Quantity:
         val = self.instrument.read_float(
             registeraddress=PARAM_MAP["duty_cycle"],
             byteorder=minimalmodbus.BYTEORDER_LITTLE_SWAP,
         )
         self.last_action = time.perf_counter()
-        return pint.Quantity(val / 100.0, "percent")
+        return pint.Quantity(val, "percent")
 
     def __init__(self, driver: ModelInterface, key: tuple[str, int], **kwargs: dict):
         super().__init__(driver, key, **kwargs)
@@ -108,8 +116,8 @@ class Device(ModelDevice):
         self.instrument = minimalmodbus.Instrument(
             port=self.s, slaveaddress=int(channel)
         )
-        self.ramp_target = None
-        self.ramp_rate = None
+        self.ramp_target = pint.Quantity("NaN", "degC")
+        self.ramp_rate = pint.Quantity("0 K/min")
         self.portlock = RLock()
         self.last_action = time.perf_counter()
         self.ramp_task = Thread(target=self._temperature_ramp, daemon=True)
@@ -136,11 +144,16 @@ class Device(ModelDevice):
                 rw=True,
                 minimum=pint.Quantity(0, "degC"),
             ),
+            "duty_cycle": Attr(
+                type=pint.Quantity,
+                units="percent",
+                status=False,
+            ),
         }
         return attrs_dict
 
     @modbus_delay
-    def set_attr(self, attr: str, val: Val, **kwargs: dict) -> Val:
+    def set_attr(self, attr: str, val: Val, **kwargs: dict) -> None:
         assert attr in self.attrs(), f"unknown attr: {attr!r}"
         props = self.attrs()[attr]
         assert props.rw
@@ -173,8 +186,6 @@ class Device(ModelDevice):
             )
             self.last_action = time.perf_counter()
 
-        return val
-
     @modbus_delay
     def get_attr(self, attr: str, **kwargs: dict) -> Val:
         """
@@ -195,17 +206,17 @@ class Device(ModelDevice):
     def do_measure(self, **kwargs):
         setp = self.setpoint
         temp = self.temperature
+        duty = self.duty_cycle
         r_rt = self.ramp_rate
         r_tt = self.ramp_target
         uts = datetime.now().timestamp()
         data_vars = {
             "setpoint": (["uts"], [setp.m], {"units": str(setp.u)}),
+            "duty_cycle": (["uts"], [duty.m], {"units": str(duty.u)}),
             "temperature": (["uts"], [temp.m], {"units": str(temp.u)}),
+            "ramp_rate": (["uts"], [r_rt.m], {"units": str(r_rt.u)}),
+            "ramp_target": (["uts"], [r_tt.m], {"units": str(r_tt.u)}),
         }
-        if r_rt is not None:
-            data_vars["ramp_rate"] = (["uts"], [r_rt.m], {"units": str(r_rt.u)})
-        if r_tt is not None:
-            data_vars["ramp_target"] = (["uts"], [r_tt.m], {"units": str(r_tt.u)})
 
         self.last_data = xr.Dataset(
             data_vars=data_vars,
