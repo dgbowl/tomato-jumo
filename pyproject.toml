@@ -14,7 +14,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 dependencies = [
     "minimalmodbus >= 2.1.1",
-    "tomato >= 2.0",
+    "tomato >= 2.1rc3",
 ]
 classifiers = [
     "Development Status :: 3 - Alpha",
