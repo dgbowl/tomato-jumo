@@ -7,8 +7,11 @@ from tomato.driverinterface_2_1 import Attr, ModelInterface, ModelDevice, Task
 from tomato.driverinterface_2_1.decorators import coerce_val
 from functools import wraps
 import pint
+import logging
 import xarray as xr
 
+pint.set_application_registry(pint.UnitRegistry(autoconvert_offset_to_baseunit=True))
+logger = logging.getLogger(__name__)
 # Known values from:
 # JUMO Quantrol LC100/LC200/LC300
 # Universal PID Controller Series
@@ -44,7 +47,6 @@ def modbus_delay(func):
 
 
 class DriverInterface(ModelInterface):
-
     idle_measurement_interval = 10
 
     def DeviceFactory(self, key, **kwargs):
@@ -110,24 +112,28 @@ class Device(ModelDevice):
         return pint.Quantity(val, "percent")
 
     def __init__(self, driver: ModelInterface, key: tuple[str, int], **kwargs: dict):
-        super().__init__(driver, key, **kwargs)
         address, channel = key
-        self.s = serial.Serial(
-            port=address,
-            baudrate=9600,
-            bytesize=8,
-            parity="N",
-            stopbits=1,
-            exclusive=True,
-        )
+        try:
+            self.s = serial.Serial(
+                port=address,
+                baudrate=9600,
+                bytesize=8,
+                parity="N",
+                stopbits=1,
+                exclusive=True,
+            )
+        except serial.SerialException as e:
+            logger.error(e, exc_info=True)
+            raise RuntimeError(str(e)) from e
         self.instrument = minimalmodbus.Instrument(
             port=self.s, slaveaddress=int(channel)
         )
-        self.ramp_target = pint.Quantity("NaN", "degC")
+        self.ramp_target = pint.Quantity("NaN degC")
         self.ramp_rate = pint.Quantity("0 K/min")
         self.portlock = RLock()
         self.last_action = time.perf_counter()
         self.ramp_task = Thread(target=self._temperature_ramp, daemon=True)
+        super().__init__(driver, key, **kwargs)
 
     def attrs(self, **kwargs) -> dict[str, Attr]:
         """Returns a dict of available attributes for the device."""
@@ -137,7 +143,7 @@ class Device(ModelDevice):
                 units="degC",
                 status=True,
                 rw=True,
-                minimum=pint.Quantity(0, "degC"),
+                minimum=pint.Quantity("0 degC"),
             ),
             "ramp_rate": Attr(
                 type=pint.Quantity,
@@ -149,7 +155,7 @@ class Device(ModelDevice):
                 type=pint.Quantity,
                 units="degC",
                 rw=True,
-                minimum=pint.Quantity(0, "degC"),
+                minimum=pint.Quantity("0 degC"),
             ),
             "duty_cycle": Attr(
                 type=pint.Quantity,
@@ -176,7 +182,8 @@ class Device(ModelDevice):
 
     @modbus_delay
     def get_attr(self, attr: str, **kwargs: dict) -> pint.Quantity:
-        assert attr in self.attrs(), f"unknown attr: {attr!r}"
+        if attr not in self.attrs():
+            raise AttributeError(f"unknown attr: {attr!r}")
         return getattr(self, attr)
 
     def capabilities(self, **kwargs) -> set:
