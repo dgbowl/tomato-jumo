@@ -216,6 +216,8 @@ class Device(ModelDevice):
             self.ramp_task = Thread(target=self._temperature_ramp, daemon=True)
             self.ramp_task.do_run = True
             self.ramp_task.start()
+        elif isinstance(self.ramp_task, Thread) and self.ramp_task is True:
+            self.ramp_task.do_run = False
 
     def stop_task(self, **kwargs: dict) -> None:
         super().stop_task(self, **kwargs)
