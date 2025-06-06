@@ -220,7 +220,7 @@ class Device(ModelDevice):
             self.ramp_task.do_run = False
 
     def stop_task(self, **kwargs: dict) -> None:
-        super().stop_task(self, **kwargs)
+        super().stop_task(**kwargs)
         if isinstance(self.ramp_task, Thread) and self.ramp_task is True:
             self.ramp_task.do_run = False
 
