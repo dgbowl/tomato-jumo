@@ -128,7 +128,7 @@ class Device(ModelDevice):
         self.instrument = minimalmodbus.Instrument(
             port=self.s, slaveaddress=int(channel)
         )
-        self.ramp_target = pint.Quantity("NaN degC")
+        self.ramp_target = pint.Quantity("20 degC")
         self.ramp_rate = pint.Quantity("0 K/min")
         self.portlock = RLock()
         self.last_action = time.perf_counter()
@@ -217,8 +217,15 @@ class Device(ModelDevice):
             self.ramp_task.do_run = True
             self.ramp_task.start()
 
+    def stop_task(self, **kwargs: dict) -> None:
+        super().stop_task(self, **kwargs)
+        if isinstance(self.ramp_task, Thread) and self.ramp_task is True:
+            self.ramp_task.do_run = False
+
     def reset(self, **kwargs) -> None:
         super().reset(**kwargs)
+        if isinstance(self.ramp_task, Thread) and self.ramp_task is True:
+            self.ramp_task.do_run = False
         self.ramp_task.do_run = False
         self.set_attr(attr="setpoint", val=200001)
 
@@ -234,7 +241,7 @@ class Device(ModelDevice):
         t_start = time.perf_counter()
         t_prev = t_start
 
-        while getattr(thread, "do_run"):
+        while thread.do_run:
             t_now = time.perf_counter()
             if t_now - t_prev >= 2.0:
                 dt = pint.Quantity(t_now - t_start, "s")
