@@ -133,6 +133,7 @@ class Device(ModelDevice):
         self.portlock = RLock()
         self.last_action = time.perf_counter()
         self.ramp_task = Thread(target=self._temperature_ramp, daemon=True)
+        self.ramp_task.do_run = False
         super().__init__(driver, key, **kwargs)
 
     def attrs(self, **kwargs) -> dict[str, Attr]:
@@ -212,23 +213,25 @@ class Device(ModelDevice):
 
     def prepare_task(self, task: Task, **kwargs: dict) -> None:
         super().prepare_task(task=task, **kwargs)
+        if self.ramp_task.do_run is True:
+            self.ramp_task.do_run = False
+            self.ramp_task.join()
         if task.technique_name in {"temperature_ramp"}:
             self.ramp_task = Thread(target=self._temperature_ramp, daemon=True)
             self.ramp_task.do_run = True
             self.ramp_task.start()
-        elif isinstance(self.ramp_task, Thread) and self.ramp_task is True:
-            self.ramp_task.do_run = False
 
     def stop_task(self, **kwargs: dict) -> None:
         super().stop_task(**kwargs)
-        if isinstance(self.ramp_task, Thread) and self.ramp_task is True:
+        if self.ramp_task.do_run is True:
             self.ramp_task.do_run = False
+            self.ramp_task.join()
 
     def reset(self, **kwargs) -> None:
         super().reset(**kwargs)
-        if isinstance(self.ramp_task, Thread) and self.ramp_task is True:
+        if self.ramp_task.do_run is True:
             self.ramp_task.do_run = False
-        self.ramp_task.do_run = False
+            self.ramp_task.join()
         self.set_attr(attr="setpoint", val=200001)
 
     def _temperature_ramp(self) -> None:
@@ -258,4 +261,4 @@ class Device(ModelDevice):
                 else:
                     self.set_attr(attr="setpoint", val=setpoint)
                 t_prev = t_now
-            time.sleep(0.2)
+            time.sleep(0.1)
