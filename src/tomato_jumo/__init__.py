@@ -147,7 +147,7 @@ class Device(ModelDevice):
         self.instrument = minimalmodbus.Instrument(
             port=self.s, slaveaddress=int(channel)
         )
-        self.instrument.serial.timeout = 0.1
+        self.instrument.serial.timeout = NORESPONSE_MAX_RETRIES*MODBUS_DELAY
         self.ramp_target = pint.Quantity("20 degC")
         self.ramp_rate = pint.Quantity("0 K/min")
         self.portlock = RLock()
