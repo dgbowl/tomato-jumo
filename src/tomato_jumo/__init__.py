@@ -212,27 +212,38 @@ class Device(ModelDevice):
         )
 
     def prepare_task(self, task: Task, **kwargs: dict) -> None:
+        logger.critical("preparing task (parent fn)")
         super().prepare_task(task=task, **kwargs)
         if self.ramp_task.do_run is True:
+            logger.critical("joining ramp task")
             self.ramp_task.do_run = False
             self.ramp_task.join()
         if task.technique_name in {"temperature_ramp"}:
+            logger.critical("preparing ramp task")
             self.ramp_task = Thread(target=self._temperature_ramp, daemon=True)
             self.ramp_task.do_run = True
             self.ramp_task.start()
+        logger.critical("task prepared")
 
     def stop_task(self, **kwargs: dict) -> None:
+        logger.critical("stopping task (parent fn)")
         super().stop_task(**kwargs)
         if self.ramp_task.do_run is True:
+            logger.critical("joining ramp task")
             self.ramp_task.do_run = False
             self.ramp_task.join()
+        logger.critical("task stopped")
 
     def reset(self, **kwargs) -> None:
+        logger.critical("resetting component (parent fn)")
         super().reset(**kwargs)
         if self.ramp_task.do_run is True:
+            logger.critical("joining ramp task")
             self.ramp_task.do_run = False
             self.ramp_task.join()
+        logger.critical("resetting setpoint")
         self.set_attr(attr="setpoint", val=200001)
+        logger.critical("component reset")
 
     def _temperature_ramp(self) -> None:
         thread = current_thread()
