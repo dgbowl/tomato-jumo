@@ -33,6 +33,7 @@ REGISTER_MAP = {
 PARAM_MAP = {v: k for k, v in REGISTER_MAP.items()}
 
 MODBUS_DELAY = 0.02
+NORESPONSE_MAX_RETRIES = 10
 
 
 def modbus_delay(func):
@@ -42,6 +43,20 @@ def modbus_delay(func):
             if time.perf_counter() - self.last_action < MODBUS_DELAY:
                 time.sleep(MODBUS_DELAY)
             return func(self, **kwargs)
+
+    return wrapper
+
+def modbus_retry(func):
+    @wraps(func)
+    def wrapper(self: ModelDevice, **kwargs):
+        retry = 0
+        while retry < NORESPONSE_MAX_RETRIES:
+            try:
+                return func(self, **kwargs)
+            except minimalmodbus.NoResponseError:
+                logger.warning("no response from instrument (retry no. %d)", retry)
+                retry += 1
+        raise RuntimeError("maximum number of retries exceeded")
 
     return wrapper
 
@@ -77,6 +92,7 @@ class Device(ModelDevice):
 
     @property
     @modbus_delay
+    @modbus_retry
     def temperature(self) -> pint.Quantity:
         val = self.instrument.read_float(
             registeraddress=PARAM_MAP["temperature"],
@@ -87,6 +103,7 @@ class Device(ModelDevice):
 
     @property
     @modbus_delay
+    @modbus_retry
     def setpoint(self) -> pint.Quantity:
         val = self.instrument.read_float(
             registeraddress=PARAM_MAP["setpoint"],
@@ -94,6 +111,7 @@ class Device(ModelDevice):
         )
         # Check for controller setpoint - read EEPROM value as fallback
         if val == 200001:
+            time.sleep(MODBUS_DELAY)
             val = self.instrument.read_float(
                 registeraddress=PARAM_MAP["eeprom_setpoint"],
                 byteorder=minimalmodbus.BYTEORDER_LITTLE_SWAP,
@@ -103,6 +121,7 @@ class Device(ModelDevice):
 
     @property
     @modbus_delay
+    @modbus_retry
     def duty_cycle(self) -> pint.Quantity:
         val = self.instrument.read_float(
             registeraddress=PARAM_MAP["duty_cycle"],
@@ -128,6 +147,7 @@ class Device(ModelDevice):
         self.instrument = minimalmodbus.Instrument(
             port=self.s, slaveaddress=int(channel)
         )
+        self.instrument.serial.timeout = NORESPONSE_MAX_RETRIES*MODBUS_DELAY
         self.ramp_target = pint.Quantity("20 degC")
         self.ramp_rate = pint.Quantity("0 K/min")
         self.portlock = RLock()
