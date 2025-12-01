@@ -19,6 +19,7 @@ logger = logging.getLogger(__name__)
 # Interface Description Modbus
 # Section 4: Modbus addresses
 # 0x3200 - RAM setpoint (RW), set to 200001 to use controller setpoint
+# 0x0025 - controller logic (1 = 0x8001, 2 = 0x8002 ....)
 # 0x0031 - controller value, i.e. the process variable
 # 0x0035 - controller setpoint (RW), persistent but EEPROM-based, use RAM setpoint instead
 # 0x0037 - controller output in %
@@ -28,6 +29,7 @@ REGISTER_MAP = {
     0x0031: "temperature",
     0x0035: "eeprom_setpoint",
     0x0037: "duty_cycle",
+    0x0025: "heater_on",
 }
 
 PARAM_MAP = {v: k for k, v in REGISTER_MAP.items()}
@@ -45,6 +47,7 @@ def modbus_delay(func):
             return func(self, **kwargs)
 
     return wrapper
+
 
 def modbus_retry(func):
     @wraps(func)
@@ -130,6 +133,20 @@ class Device(ModelDevice):
         self.last_action = time.perf_counter()
         return pint.Quantity(val, "percent")
 
+    @property
+    @modbus_delay
+    @modbus_retry
+    def heater_on(self) -> bool:
+        val = self.instrument.read_register(
+            registeraddress=PARAM_MAP["heater_on"],
+        )
+        self.last_action = time.perf_counter()
+        if val == 0x8001:
+            ret = True
+        else:
+            ret = False
+        return ret
+
     def __init__(self, driver: ModelInterface, key: tuple[str, int], **kwargs: dict):
         address, channel = key
         try:
@@ -147,7 +164,7 @@ class Device(ModelDevice):
         self.instrument = minimalmodbus.Instrument(
             port=self.s, slaveaddress=int(channel)
         )
-        self.instrument.serial.timeout = NORESPONSE_MAX_RETRIES*MODBUS_DELAY
+        self.instrument.serial.timeout = NORESPONSE_MAX_RETRIES * MODBUS_DELAY
         self.ramp_target = pint.Quantity("20 degC")
         self.ramp_rate = pint.Quantity("0 K/min")
         self.portlock = RLock()
@@ -183,6 +200,11 @@ class Device(ModelDevice):
                 units="percent",
                 status=False,
             ),
+            "heater_on": Attr(
+                type=bool,
+                rw=True,
+                status=True,
+            ),
         }
         return attrs_dict
 
@@ -191,6 +213,12 @@ class Device(ModelDevice):
     def set_attr(self, attr: str, val: pint.Quantity, **kwargs: dict) -> pint.Quantity:
         if attr in {"ramp_rate", "ramp_target"}:
             setattr(self, attr, val)
+        elif attr in {"heater_on"}:
+            register_nr = PARAM_MAP[attr]
+            self.instrument.write_register(
+                registeraddress=register_nr, value=0x8001 if val is True else 0x8010
+            )
+            self.last_action = time.perf_counter()
         else:
             register_nr = PARAM_MAP[attr]
             self.instrument.write_float(
@@ -252,6 +280,7 @@ class Device(ModelDevice):
         if self.ramp_task.do_run is True:
             self.ramp_task.do_run = False
             self.ramp_task.join()
+        self.set_attr(attr="heater_on", val=False)
         self.set_attr(attr="setpoint", val=200001)
 
     def _temperature_ramp(self) -> None:
