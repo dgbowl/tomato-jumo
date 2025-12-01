@@ -14,6 +14,7 @@ This driver is based on the [`minimalmodbus`](https://github.com/pyhys/minimalmo
 - `duty_cycle` which is the current load requested by the controller, `pint.Quantity(float, "percent")`
 - `ramp_rate` which is the temperature ramp rate, `pint.Quantity(float, "K/min")`
 - `ramp_target` which is the target of the temperature ramp, `pint.Quantity(float, "degC")`
+- `heater_on` which switches the heater on (`True`) or off (`False`)
 
 ## Contributors
 
